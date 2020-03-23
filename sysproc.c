@@ -89,3 +89,40 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int
+sys_hello(void)
+{
+  cprintf("Hello World from the Kernel!\n");
+  return 0;
+}
+
+int
+sys_info(void)
+{
+  int param;
+  argint(0, &param);
+
+  struct proc *curproc;
+  curproc = myproc();
+  if (param == 1)
+  {
+    cprintf("Number of processes: %d\n", info(param));
+  }
+  else if(param == 2)
+  {
+    cprintf("Number of System Calls: %d\n", curproc->num_sys_call);
+  }
+  else if(param == 3)
+  {
+    cprintf("Number of Memory Page: %d\n", (int)(curproc->sz)/PGSIZE);
+  }
+  else
+  {
+    cprintf("Missing / Incorrect parameter value!\n");
+    return -1;
+  }
+  return 0;
+}
+
+

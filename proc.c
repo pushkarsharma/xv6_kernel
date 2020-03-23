@@ -112,6 +112,9 @@ found:
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
 
+  // Initialize process system call count
+  p->num_sys_call = 0;
+
   return p;
 }
 
@@ -207,6 +210,9 @@ fork(void)
     if(curproc->ofile[i])
       np->ofile[i] = filedup(curproc->ofile[i]);
   np->cwd = idup(curproc->cwd);
+
+  // Initialize process system call count
+  np->num_sys_call = 0;
 
   safestrcpy(np->name, curproc->name, sizeof(curproc->name));
 
@@ -530,5 +536,28 @@ procdump(void)
         cprintf(" %p", pc[i]);
     }
     cprintf("\n");
+  }
+}
+
+int
+info(int param)
+{
+  argint(0, &param);
+  if(param == 1)
+  {
+    struct proc *p;
+    int count = 0;
+    acquire(&ptable.lock);
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    {
+      if(p->state != UNUSED)
+        count++;
+    }
+    release(&ptable.lock);
+    return count;
+  }
+  else
+  {
+    return -1;
   }
 }
