@@ -1,0 +1,232 @@
+diff --git a/Makefile b/Makefile
+index 09d790c..856cc76 100644
+--- a/Makefile
++++ b/Makefile
+@@ -181,6 +181,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++  _prog\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -217,7 +218,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS := 1
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+@@ -250,7 +251,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c prog.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff --git a/proc.c b/proc.c
+index 806b1b1..a0af079 100644
+--- a/proc.c
++++ b/proc.c
+@@ -88,6 +88,10 @@ allocproc(void)
+ found:
+   p->state = EMBRYO;
+   p->pid = nextpid++;
++  p->tickets = 10;
++  p->stride = 10000 / p->tickets;
++  p->pass = p->stride;
++  p->tick_counter = 0;
+ 
+   release(&ptable.lock);
+ 
+@@ -231,6 +235,26 @@ exit(void)
+   struct proc *p;
+   int fd;
+ 
++static char *states[] = {
++  [UNUSED]    "unused",
++  [EMBRYO]    "embryo",
++  [SLEEPING]  "sleep ",
++  [RUNNABLE]  "runble",
++  [RUNNING]   "run   ",
++  [ZOMBIE]    "zombie"
++  };
++  char *state;
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    if(p->state == UNUSED)
++      continue;
++    if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
++      state = states[p->state];
++    else
++      state = "???";
++    
++    cprintf("From  %s-%d: %d %s %s ticket=%d \n", myproc()->name, myproc()->pid, p->pid, state, p->name, p->tick_counter);
++  }
++
+   if(curproc == initproc)
+     panic("init exiting");
+ 
+@@ -332,26 +356,42 @@ scheduler(void)
+ 
+     // Loop over process table looking for process to run.
+     acquire(&ptable.lock);
++
++    struct proc *selected_p = ptable.proc;
++    int min_pass = 99999;
+     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+       if(p->state != RUNNABLE)
+         continue;
++      if(p->pass < min_pass){
++        min_pass = p->pass;
++        selected_p = p;
++      }
++    }
++  
+ 
+-      // Switch to chosen process.  It is the process's job
+-      // to release ptable.lock and then reacquire it
+-      // before jumping back to us.
+-      c->proc = p;
+-      switchuvm(p);
+-      p->state = RUNNING;
+-
+-      swtch(&(c->scheduler), p->context);
+-      switchkvm();
+-
+-      // Process is done running for now.
+-      // It should have changed its p->state before coming back.
+-      c->proc = 0;
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      if(p->state != RUNNABLE)
++        continue;
++      if(p == selected_p){
++        p->pass += p->stride;
++        p->tick_counter++;
++        // Switch to chosen process.  It is the process's job
++        // to release ptable.lock and then reacquire it
++        // before jumping back to us.
++        c->proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++
++        // Process is done running for now.
++        // It should have changed its p->state before coming back.
++        c->proc = 0;
++        break;
++      }
+     }
+     release(&ptable.lock);
+-
+   }
+ }
+ 
+diff --git a/proc.h b/proc.h
+index 1647114..3f9ab71 100644
+--- a/proc.h
++++ b/proc.h
+@@ -33,6 +33,7 @@ struct context {
+ };
+ 
+ enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
++//int stride1 = 10000;
+ 
+ // Per-process state
+ struct proc {
+@@ -49,6 +50,10 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int tickets;                 // Ticket Count
++  int stride;                  // Stride
++  int pass;                    // Pass
++  int tick_counter;            // Tick Counter
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff --git a/syscall.c b/syscall.c
+index ee85261..747a98f 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,7 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_ticket_assign(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +127,7 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_ticket_assign] sys_ticket_assign,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..a29f27c 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_ticket_assign   22
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..9250019 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -89,3 +89,25 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_ticket_assign(void)
++{
++  int x;
++  struct proc *p = myproc();
++  argint(0, &x);
++  if(x == 1)
++  {
++    int ticket_arg;
++    argint(1, &ticket_arg);
++    p->tickets = ticket_arg;
++    p->stride = 10000 / p->tickets;
++    p->pass = p->stride;
++    return 0;
++  }
++  else
++  {
++    //cprintf("Process with %d tickets has %d ticks.\n", p->tickets, p->tick_counter);
++    return p->tick_counter;
++  }
++}
+diff --git a/user.h b/user.h
+index 4f99c52..80fe58f 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int ticket_assign(int, int);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..1c9df88 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,4 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(ticket_assign)
