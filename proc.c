@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "rand.h"
 
 struct {
   struct spinlock lock;
@@ -86,6 +87,8 @@ allocproc(void)
   return 0;
 
 found:
+  p->tickets = 10;
+  p->tick_counter = 0;
   p->state = EMBRYO;
   p->pid = nextpid++;
 
@@ -231,6 +234,26 @@ exit(void)
   struct proc *p;
   int fd;
 
+static char *states[] = {
+  [UNUSED]    "unused",
+  [EMBRYO]    "embryo",
+  [SLEEPING]  "sleep ",
+  [RUNNABLE]  "runble",
+  [RUNNING]   "run   ",
+  [ZOMBIE]    "zombie"
+  };
+  char *state;
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == UNUSED)
+      continue;
+    if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
+      state = states[p->state];
+    else
+      state = "???";
+    
+    cprintf("From  %s-%d: %d %s %s ticket=%d \n", myproc()->name, myproc()->pid, p->pid, state, p->name, p->tick_counter);
+  }
+
   if(curproc == initproc)
     panic("init exiting");
 
@@ -330,12 +353,29 @@ scheduler(void)
     // Enable interrupts on this processor.
     sti();
 
+  int counter = 0;
+  int global_tickets_total = 0;
+
+  for(p=ptable.proc; p<&ptable.proc[NPROC];p++)
+  {
+    if(p->state != RUNNABLE)
+      continue;
+    global_tickets_total += p->tickets;
+  }
+
+  long ticket_choice = random_at_most(global_tickets_total);
+
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
 
+      counter += p->tickets;
+      if(counter < ticket_choice){
+        continue;
+      }
+      p->tick_counter++;
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
@@ -349,6 +389,7 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
+      break;
     }
     release(&ptable.lock);
 

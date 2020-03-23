@@ -89,3 +89,22 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int sys_ticket_assign(void)
+{
+  int x;
+  struct proc *p = myproc();
+  argint(0, &x);
+  if(x == 1)
+  {
+    int tickets;
+    argint(1, &tickets);
+    p->tickets = tickets;
+    return 0;
+  }
+  else
+  {
+    //cprintf("Process with %d tickets has %d ticks.\n", p->tickets, p->tick_counter);
+    return p->tick_counter;
+  }
+}
