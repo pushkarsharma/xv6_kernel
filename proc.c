@@ -88,6 +88,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->isthread = 0;
 
   release(&ptable.lock);
 
@@ -174,6 +175,53 @@ growproc(int n)
   return 0;
 }
 
+int
+clone(void *stack, int size)
+{
+  int i, pid;
+  struct proc *np;
+  struct proc *curproc = myproc();
+
+  // Allocate process.
+  if((np = allocproc()) == 0){
+    return -1;
+  }
+
+  np->pgdir = curproc->pgdir;
+  np->sz = curproc->sz;
+
+  np->parent = curproc;
+  *np->tf = *curproc->tf;
+  np->isthread = 1;
+
+  // Clear %eax so that fork returns 0 in the child.
+  np->tf->eax = 0;
+
+  uint stacksize = 0;
+  stacksize = curproc->tf->ebp - curproc->tf->esp;
+  stacksize += 16;
+  np->tf->ebp = (int)stack + size - 16;
+  np->tf->esp = np->tf->ebp - stacksize + 16;
+  memmove((void *)np->tf->esp, (void*)curproc->tf->esp, stacksize);
+
+  for(i = 0; i < NOFILE; i++)
+    if(curproc->ofile[i])
+      np->ofile[i] = curproc->ofile[i];
+
+  np->cwd = curproc->cwd;
+
+  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+  pid = np->pid;
+
+  acquire(&ptable.lock);
+
+  np->state = RUNNABLE;
+
+  release(&ptable.lock);
+  return pid;
+}
+
 // Create a new process copying p as the parent.
 // Sets up stack to return as if from system call.
 // Caller must set state of returned proc to RUNNABLE.
@@ -230,17 +278,44 @@ exit(void)
   struct proc *curproc = myproc();
   struct proc *p;
   int fd;
+cprintf("exit");
 
   if(curproc == initproc)
     panic("init exiting");
 
-  // Close all open files.
-  for(fd = 0; fd < NOFILE; fd++){
-    if(curproc->ofile[fd]){
-      fileclose(curproc->ofile[fd]);
-      curproc->ofile[fd] = 0;
+  /*for(;;){
+  	int thread_precence_flag=0;
+    acquire(&ptable.lock);
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+
+     if(p->isthread)
+     {
+     	if(p->state != ZOMBIE)
+     	{
+     		thread_precence_flag=1;
+     	}
+     }
     }
-  }
+    release(&ptable.lock);
+
+    if(thread_precence_flag==0)
+    {
+    	break;
+    }
+  }*/
+
+   if(curproc->isthread==0)
+   {
+	  // Close all open files.
+	  for(fd = 0; fd < NOFILE; fd++){
+	    if(curproc->ofile[fd]){
+	      fileclose(curproc->ofile[fd]);
+	      curproc->ofile[fd] = 0;
+	    }
+	  }
+   }
 
   begin_op();
   iput(curproc->cwd);
@@ -269,6 +344,52 @@ exit(void)
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
+/*int
+wait(void)
+{
+  struct proc *p;
+  int havekids, pid;
+  struct proc *curproc = myproc();
+  if(curproc->isthread==0)
+  {
+	  acquire(&ptable.lock);
+	  for(;;){
+	    // Scan through table looking for exited children.
+	    havekids = 0;
+	    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+	      if(p->parent != curproc)
+	        continue;
+	      havekids = 1;
+	      if(p->state == ZOMBIE){
+	        // Found one.
+	        pid = p->pid;
+	        kfree(p->kstack);
+	        p->kstack = 0;
+	        freevm(p->pgdir);
+	        p->pid = 0;
+	        p->parent = 0;
+	        p->name[0] = 0;
+	        p->killed = 0;
+	        p->state = UNUSED;
+	        release(&ptable.lock);
+	        return pid;
+	      }
+	    }
+
+	    // No point waiting if we don't have any children.
+	    if(!havekids || curproc->killed){
+	      release(&ptable.lock);
+	      return -1;
+	    }
+
+	    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
+	    sleep(curproc, &ptable.lock);  //DOC: wait-sleep
+	  }
+	}
+	else
+		{return -1;}
+}*/
+
 int
 wait(void)
 {
@@ -389,6 +510,16 @@ yield(void)
   myproc()->state = RUNNABLE;
   sched();
   release(&ptable.lock);
+}
+
+int
+zombify(void)
+{
+  acquire(&ptable.lock);
+  myproc()->state = ZOMBIE;
+  sched();
+  release(&ptable.lock);
+  return 0;
 }
 
 // A fork child's very first scheduling by scheduler()

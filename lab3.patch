@@ -1,0 +1,325 @@
+diff --git a/Makefile b/Makefile
+index 09d790c..565af82 100644
+--- a/Makefile
++++ b/Makefile
+@@ -181,6 +181,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_thread_lab\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -217,7 +218,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 2
++CPUS := 1
+ endif
+ QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+@@ -250,7 +251,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c thread_lab.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff --git a/defs.h b/defs.h
+index 82fb982..3b16547 100644
+--- a/defs.h
++++ b/defs.h
+@@ -120,6 +120,8 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             clone(void *, int);
++int 			zombify(void);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/proc.c b/proc.c
+index 806b1b1..f8955cc 100644
+--- a/proc.c
++++ b/proc.c
+@@ -88,6 +88,7 @@ allocproc(void)
+ found:
+   p->state = EMBRYO;
+   p->pid = nextpid++;
++  p->isthread = 0;
+ 
+   release(&ptable.lock);
+ 
+@@ -174,6 +175,53 @@ growproc(int n)
+   return 0;
+ }
+ 
++int
++clone(void *stack, int size)
++{
++  int i, pid;
++  struct proc *np;
++  struct proc *curproc = myproc();
++
++  // Allocate process.
++  if((np = allocproc()) == 0){
++    return -1;
++  }
++
++  np->pgdir = curproc->pgdir;
++  np->sz = curproc->sz;
++
++  np->parent = curproc;
++  *np->tf = *curproc->tf;
++  np->isthread = 1;
++
++  // Clear %eax so that fork returns 0 in the child.
++  np->tf->eax = 0;
++
++  uint stacksize = 0;
++  stacksize = curproc->tf->ebp - curproc->tf->esp;
++  stacksize += 16;
++  np->tf->ebp = (int)stack + size - 16;
++  np->tf->esp = np->tf->ebp - stacksize + 16;
++  memmove((void *)np->tf->esp, (void*)curproc->tf->esp, stacksize);
++
++  for(i = 0; i < NOFILE; i++)
++    if(curproc->ofile[i])
++      np->ofile[i] = curproc->ofile[i];
++
++  np->cwd = curproc->cwd;
++
++  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
++
++  pid = np->pid;
++
++  acquire(&ptable.lock);
++
++  np->state = RUNNABLE;
++
++  release(&ptable.lock);
++  return pid;
++}
++
+ // Create a new process copying p as the parent.
+ // Sets up stack to return as if from system call.
+ // Caller must set state of returned proc to RUNNABLE.
+@@ -230,17 +278,44 @@ exit(void)
+   struct proc *curproc = myproc();
+   struct proc *p;
+   int fd;
++cprintf("exit");
+ 
+   if(curproc == initproc)
+     panic("init exiting");
+ 
+-  // Close all open files.
+-  for(fd = 0; fd < NOFILE; fd++){
+-    if(curproc->ofile[fd]){
+-      fileclose(curproc->ofile[fd]);
+-      curproc->ofile[fd] = 0;
++  /*for(;;){
++  	int thread_precence_flag=0;
++    acquire(&ptable.lock);
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      if(p->state != RUNNABLE)
++        continue;
++
++     if(p->isthread)
++     {
++     	if(p->state != ZOMBIE)
++     	{
++     		thread_precence_flag=1;
++     	}
++     }
+     }
+-  }
++    release(&ptable.lock);
++
++    if(thread_precence_flag==0)
++    {
++    	break;
++    }
++  }*/
++
++   if(curproc->isthread==0)
++   {
++	  // Close all open files.
++	  for(fd = 0; fd < NOFILE; fd++){
++	    if(curproc->ofile[fd]){
++	      fileclose(curproc->ofile[fd]);
++	      curproc->ofile[fd] = 0;
++	    }
++	  }
++   }
+ 
+   begin_op();
+   iput(curproc->cwd);
+@@ -269,6 +344,52 @@ exit(void)
+ 
+ // Wait for a child process to exit and return its pid.
+ // Return -1 if this process has no children.
++/*int
++wait(void)
++{
++  struct proc *p;
++  int havekids, pid;
++  struct proc *curproc = myproc();
++  if(curproc->isthread==0)
++  {
++	  acquire(&ptable.lock);
++	  for(;;){
++	    // Scan through table looking for exited children.
++	    havekids = 0;
++	    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++	      if(p->parent != curproc)
++	        continue;
++	      havekids = 1;
++	      if(p->state == ZOMBIE){
++	        // Found one.
++	        pid = p->pid;
++	        kfree(p->kstack);
++	        p->kstack = 0;
++	        freevm(p->pgdir);
++	        p->pid = 0;
++	        p->parent = 0;
++	        p->name[0] = 0;
++	        p->killed = 0;
++	        p->state = UNUSED;
++	        release(&ptable.lock);
++	        return pid;
++	      }
++	    }
++
++	    // No point waiting if we don't have any children.
++	    if(!havekids || curproc->killed){
++	      release(&ptable.lock);
++	      return -1;
++	    }
++
++	    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
++	    sleep(curproc, &ptable.lock);  //DOC: wait-sleep
++	  }
++	}
++	else
++		{return -1;}
++}*/
++
+ int
+ wait(void)
+ {
+@@ -391,6 +512,16 @@ yield(void)
+   release(&ptable.lock);
+ }
+ 
++int
++zombify(void)
++{
++  acquire(&ptable.lock);
++  myproc()->state = ZOMBIE;
++  sched();
++  release(&ptable.lock);
++  return 0;
++}
++
+ // A fork child's very first scheduling by scheduler()
+ // will swtch here.  "Return" to user space.
+ void
+diff --git a/proc.h b/proc.h
+index 1647114..5ed97b9 100644
+--- a/proc.h
++++ b/proc.h
+@@ -49,6 +49,8 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int isthread;                // Thread indicator
++  void *stack;                 // Stack pointer
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff --git a/syscall.c b/syscall.c
+index ee85261..1d2c580 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,8 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_clone(void);
++extern int sys_zombify(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_clone]   sys_clone,
++[SYS_zombify]   sys_zombify,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..656903d 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_clone  22
++#define SYS_zombify  23
+\ No newline at end of file
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..c546136 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -89,3 +89,19 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_clone(void)
++{
++  int stack;
++  int size = 0;
++  argint(0, &stack);
++  argint(1, &size);
++  return clone((void *)stack, size);
++}
++
++int
++sys_zombify(void)
++{
++  return zombify();
++}
+\ No newline at end of file
+diff --git a/user.h b/user.h
+index 4f99c52..1797f34 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,8 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int clone(void *, int);
++int zombify(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..2010303 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,5 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(clone)
++SYSCALL(zombify)
+\ No newline at end of file

@@ -89,3 +89,19 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int
+sys_clone(void)
+{
+  int stack;
+  int size = 0;
+  argint(0, &stack);
+  argint(1, &size);
+  return clone((void *)stack, size);
+}
+
+int
+sys_zombify(void)
+{
+  return zombify();
+}
